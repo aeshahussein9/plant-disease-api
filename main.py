@@ -1,33 +1,21 @@
-import tensorflow as tf
-import numpy as np
-from PIL import Image
-import matplotlib.pyplot as plt
-from fastapi import FastAPI, File, UploadFile
 import io
-
-# --- كود الـ API الجديد ---
-app = FastAPI()
-
-
+import numpy as np
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+import tensorflow as tf
+from PIL import Image, ImageStat
+import os
+
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # يسمح لـ Flutter بالوصول
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-
-
-
-
-
-
-
-# 1. القاموس المطور (كما هو تماماً بدون تغيير حرف)
 class_info = {
     'potato_early': {
         'name': 'Early Blight (Potato)',
@@ -131,9 +119,13 @@ class_info = {
     }
 }
 
-# 2. دالة حساب الشدة (كما هي تماماً بدون تغيير حرف)
+
+def check_brightness(img):
+    stat = ImageStat.Stat(img)
+    brightness = stat.mean[0] 
+    return brightness < 40 
+
 def calculate_severity_pure_numpy(image):
-    # تعديل بسيط لتقبل Image Object مباشرة بدلاً من مسار عشان الـ API
     data = np.array(image)
     r, g, b = data[:,:,0], data[:,:,1], data[:,:,2]
     leaf_mask = (g > r) & (g > b) & (g > 40)
@@ -143,49 +135,61 @@ def calculate_severity_pure_numpy(image):
     if leaf_pixels == 0: return 0.0
     return round(min((disease_pixels / leaf_pixels) * 100, 100), 2)
 
-import os
 
-# السطر ده بيعرف الفولدر اللي إنتِ واقفة فيه حالياً
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# السطر ده بيبني المسار للموديل أياً كان الجهاز اللي شغال عليه
 model_path = os.path.join(BASE_DIR, "Disease-model.h5")
-
-# السطر اللي بيحمل الموديل فعلياً
 model = tf.keras.models.load_model(model_path)
 
-# 3. الـ API Endpoint (استخدام نفس المنطق بتاعك)
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # قراءة الصورة القادمة من الـ API
     contents = await file.read()
     img_pil = Image.open(io.BytesIO(contents)).convert('RGB')
     
-    # نفس خطوات المعالجة في دالتك
+    
+    if check_brightness(img_pil):
+        return {
+            "status": "error",
+            "message": "The image is too dark. Please take a photo in better lighting."
+        }
+
+    
     labels = ['potato_early', 'potato_healthy', 'potato_late', 'tomato_early', 'tomato_healthy', 'tomato_late']
     img_resized = img_pil.resize((256, 256))
     img_array = np.array(img_resized) / 255.0
     img_array = np.expand_dims(img_array, axis=0)
 
+    
     predictions = model.predict(img_array, verbose=0)
-    predicted_class = labels[np.argmax(predictions)]
+    confidence = float(np.max(predictions[0]))
+    
+    
+    if confidence < 0.60:
+        return {
+            "status": "error",
+            "message": "Object not recognized. Please upload a clear photo of the plant leaf."
+        }
+
+    predicted_index = np.argmax(predictions)
+    predicted_class = labels[predicted_index]
+    
     
     severity_pct = 0
     if "healthy" in predicted_class:
         risk_level = "Safe"
     else:
-        # استدعاء دالتك لحساب الشدة
         severity_pct = calculate_severity_pure_numpy(img_pil)
         risk_level = "Severe" if severity_pct > 20 else "Moderate" if severity_pct > 5 else "Early"
             
     plant_data = class_info.get(predicted_class)
     treatment_data = plant_data['treatments'].get(risk_level)
 
-    # الرد بصيغة JSON عشان الـ API
+    
     return {
+        "status": "success",
         "diagnosis": plant_data['name'],
         "risk_level": risk_level,
         "severity": f"{severity_pct}%",
+        "confidence": f"{confidence * 100:.2f}%",
         "treatment": {
             "pesticides": treatment_data['pesticides'],
             "home_remedies": treatment_data['home_remedies'],
@@ -196,4 +200,7 @@ async def predict(file: UploadFile = File(...)):
 
 
 
-# ملاحظة: تم الحفاظ على هيكل كودك الأصلي بالكامل داخل الـ API
+
+
+
+       
